@@ -5,15 +5,13 @@
 // ============================================================================
 // 1. Fetches central feeds (tweets, podcasts, blogs)
 // 2. Fetches prompts from GitHub
-// 3. Calls Claude API to generate a Chinese digest
+// 3. Calls DeepSeek API to generate a Chinese digest
 // 4. Sends digest to WeCom webhook
 //
 // Environment variables required:
-//   ANTHROPIC_API_KEY  — Anthropic API key
-//   WECOM_WEBHOOK_URL  — WeCom group bot webhook URL
+//   DEEPSEEK_API_KEY  — DeepSeek API key (platform.deepseek.com)
+//   WECOM_WEBHOOK_URL — WeCom group bot webhook URL
 // ============================================================================
-
-import Anthropic from '@anthropic-ai/sdk';
 
 // -- Config ------------------------------------------------------------------
 
@@ -68,9 +66,9 @@ async function sendWecom(text, webhookUrl) {
 // -- Main --------------------------------------------------------------------
 
 async function main() {
-  const apiKey      = process.env.ANTHROPIC_API_KEY;
+  const apiKey      = process.env.DEEPSEEK_API_KEY;
   const webhookUrl  = process.env.WECOM_WEBHOOK_URL;
-  if (!apiKey)     throw new Error('ANTHROPIC_API_KEY is not set');
+  if (!apiKey)     throw new Error('DEEPSEEK_API_KEY is not set');
   if (!webhookUrl) throw new Error('WECOM_WEBHOOK_URL is not set');
 
   console.log('Fetching feeds and prompts...');
@@ -132,16 +130,28 @@ ${JSON.stringify({ podcasts: feedPodcasts?.podcasts || [], x: feedX?.x || [], bl
 - 每条内容必须附上原始链接
 - 语言：${LANGUAGE === 'zh' ? '全部中文' : LANGUAGE === 'bilingual' ? '中英双语逐段交替' : '全部英文'}`;
 
-  console.log('Calling Claude API...');
-  const client = new Anthropic({ apiKey });
-  const message = await client.messages.create({
-    model: 'claude-sonnet-4-5',
-    max_tokens: 4096,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userPrompt }]
+  console.log('Calling DeepSeek API...');
+  const res = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`
+    },
+    body: JSON.stringify({
+      model: 'deepseek-chat',
+      max_tokens: 4096,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user',   content: userPrompt }
+      ]
+    })
   });
-
-  const digest = message.content[0].text;
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(`DeepSeek API error: ${err.error?.message || JSON.stringify(err)}`);
+  }
+  const data = await res.json();
+  const digest = data.choices[0].message.content;
   console.log('Digest generated, sending to WeCom...');
 
   await sendWecom(digest, webhookUrl);
