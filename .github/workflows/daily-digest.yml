@@ -1,0 +1,30 @@
+name: Daily AI Builders Digest
+
+on:
+  schedule:
+    # 每天北京时间 07:00 = UTC 23:00（前一天）
+    - cron: '0 23 * * *'
+  workflow_dispatch: # 支持手动触发
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: scripts/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: scripts
+
+      - name: Run digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WECOM_WEBHOOK_URL: ${{ secrets.WECOM_WEBHOOK_URL }}
+        run: node run-digest.js
+        working-directory: scripts
