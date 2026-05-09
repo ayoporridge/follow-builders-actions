@@ -23,7 +23,53 @@ const FEED_BLOGS_URL    = 'https://raw.githubusercontent.com/zarazhangrui/follow
 const PROMPTS_BASE      = 'https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/prompts';
 const PROMPT_FILES      = ['summarize-podcast.md', 'summarize-tweets.md', 'summarize-blogs.md', 'digest-intro.md', 'translate.md'];
 
+// Extra RSS blogs to merge in addition to the central feed-blogs.json
+const EXTRA_RSS_BLOGS = [
+  { name: '乔木博客', rssUrl: 'https://blog.qiaomu.ai/feed.xml' },
+];
+
 // -- Helpers -----------------------------------------------------------------
+
+// Parse an RSS/Atom feed XML and return posts from the last 72 hours.
+// Returns array of { title, url, publishedAt, summary, author, blogName }
+async function fetchRssBlog({ name, rssUrl }, lookbackHours = 72) {
+  const res = await fetch(rssUrl);
+  if (!res.ok) throw new Error(`Failed to fetch RSS ${rssUrl}: ${res.status}`);
+  const xml = await res.text();
+
+  const cutoff = Date.now() - lookbackHours * 60 * 60 * 1000;
+  const posts = [];
+
+  // Match <item> (RSS) or <entry> (Atom) blocks
+  const itemPattern = /<item[\s>]([\s\S]*?)<\/item>|<entry[\s>]([\s\S]*?)<\/entry>/g;
+  let match;
+  while ((match = itemPattern.exec(xml)) !== null) {
+    const block = match[1] || match[2];
+    const get = (tag) => {
+      const m = block.match(new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?<\\/${tag}>`, 'i'));
+      return m ? m[1].trim() : '';
+    };
+    const title = get('title');
+    const link  = get('link') || (block.match(/<link[^>]+href="([^"]+)"/) || [])[1] || '';
+    const pubDate = get('pubDate') || get('published') || get('updated') || get('dc:date');
+    const summary = get('description') || get('summary') || get('content') || '';
+
+    if (!title || !link) continue;
+    const ts = pubDate ? new Date(pubDate).getTime() : 0;
+    if (ts && ts < cutoff) continue;
+
+    posts.push({
+      title,
+      url: link,
+      publishedAt: pubDate || '',
+      summary: summary.replace(/<[^>]+>/g, '').slice(0, 300),
+      author: name,
+      blogName: name,
+    });
+  }
+
+  return posts;
+}
 
 async function fetchJSON(url) {
   const res = await fetch(url);
@@ -37,9 +83,26 @@ async function fetchText(url) {
   return res.text();
 }
 
-// WeCom has a 2048 char limit per message — split if needed
+// Convert standard Markdown to WeCom-compatible format.
+// WeCom group bot only supports: **bold**, >quote, <font color>
+// It does NOT support: # headings, ---, [text](url) links
+function toWecomMarkdown(text) {
+  return text
+    // ### Heading → **Heading**
+    .replace(/^#{1,6}\s+(.+)$/gm, '**$1**')
+    // [link text](url) → link text: url
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2')
+    // --- horizontal rule → blank line
+    .replace(/^---+$/gm, '')
+    // collapse 3+ consecutive blank lines into 2
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// WeCom markdown messages have a 4096 char limit — split if needed
 async function sendWecom(text, webhookUrl) {
-  const MAX_LEN = 2048;
+  text = toWecomMarkdown(text);
+  const MAX_LEN = 4096;
   const chunks = [];
   let remaining = text;
   while (remaining.length > 0) {
@@ -53,7 +116,7 @@ async function sendWecom(text, webhookUrl) {
     const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ msgtype: 'text', text: { content: chunk } })
+      body: JSON.stringify({ msgtype: 'markdown', markdown: { content: chunk } })
     });
     if (!res.ok) {
       const err = await res.json();
@@ -78,6 +141,16 @@ async function main() {
     fetchJSON(FEED_BLOGS_URL),
     ...PROMPT_FILES.map(f => fetchText(`${PROMPTS_BASE}/${f}`))
   ]);
+
+  // Fetch and merge extra RSS blogs
+  const extraPosts = (await Promise.all(EXTRA_RSS_BLOGS.map(b => fetchRssBlog(b).catch(err => {
+    console.warn(`Warning: failed to fetch RSS for ${b.name}: ${err.message}`);
+    return [];
+  })))).flat();
+  if (extraPosts.length > 0) {
+    feedBlogs.blogs = [...(feedBlogs.blogs || []), ...extraPosts];
+    console.log(`Merged ${extraPosts.length} extra RSS post(s) from: ${EXTRA_RSS_BLOGS.map(b => b.name).join(', ')}`);
+  }
 
   const prompts = Object.fromEntries(
     PROMPT_FILES.map((f, i) => [f.replace('.md', '').replace(/-/g, '_'), promptTexts[i]])
